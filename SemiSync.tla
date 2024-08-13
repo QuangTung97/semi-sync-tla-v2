@@ -174,6 +174,8 @@ ZkPrepareChangeLeader ==
     /\ UNCHANGED ctl_vars
 
 
+newReplicated == [r \in Replica |-> 0]
+
 DBUpdateZKInfo(r) ==
     /\ db_epoch[r] < zk_epoch
     /\ db_epoch' = [db_epoch EXCEPT ![r] = zk_epoch]
@@ -182,7 +184,8 @@ DBUpdateZKInfo(r) ==
     /\ db_replicas' = [db_replicas EXCEPT ![r] = zk_replicas]
     /\ IF zk_leader_epoch = db_leader_epoch[r]
         THEN UNCHANGED db_replicated
-        ELSE db_replicated' = [db_replicated EXCEPT ![r] = [r2 \in Replica |-> 0]]
+        ELSE db_replicated' = [
+            db_replicated EXCEPT ![r] = [newReplicated EXCEPT ![r] = Len(db[r])]]
     /\ UNCHANGED db
     /\ UNCHANGED zk_vars
     /\ UNCHANGED global_vars
@@ -338,6 +341,7 @@ TerminateCond ==
     /\ zk_replicas = Replica
     /\ zk_leader /= nil
     /\ Len(client_log) = Len(db[zk_leader])
+    /\ zk_status = "Normal"
 
 Terminated ==
     /\ TerminateCond
@@ -362,6 +366,12 @@ Next ==
     \/ ZkPrepareChangeLeader
     \/ Terminated
 
+Spec == Init /\ [][Next]_vars
+
+FairSpec == Spec /\ WF_vars(Next)
+
+AlwaysFinish == <> TerminateCond
+
 
 ConsistentWhenLeaderValid ==
     /\ Len(db[zk_leader]) >= Len(client_log)
@@ -369,6 +379,7 @@ ConsistentWhenLeaderValid ==
     
 Consistent ==
     /\ zk_leader /= nil => ConsistentWhenLeaderValid
+    \* /\ TerminateCond => client_log /= <<41, 42>> \* Couter Condition
 
 
 Perms == Permutations(Replica)
