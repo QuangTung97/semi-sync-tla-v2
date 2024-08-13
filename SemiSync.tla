@@ -29,7 +29,7 @@ NullReplica == Replica \union {nil}
 
 max_req == 40 + 2
 max_change_leader == 2
-max_remove_replica == 2
+max_remove_replica == 1
 
 
 replicationFactor(n) == (n + 2) \div 2
@@ -164,15 +164,15 @@ ZkRemoveReplica(r) ==
 
     /\ r \in zk_replicas
     /\ r /= zk_leader
-    /\ zk_status = "Normal" \* TODO Remove
+    /\ zk_status = "Normal" \/ zk_status = "WaitReplicate"
     /\ zk_epoch' = zk_epoch + 1
     /\ zk_replicas' = zk_replicas \ {r}
     /\ IF Cardinality(zk_replicas') = 1
-        THEN /\ zk_status = "Normal"
+        THEN /\ zk_status' = "Normal"
              /\ UNCHANGED zk_deleted
-        ELSE /\ zk_status = "WaitReplicate"
+        ELSE /\ zk_status' = "WaitReplicate"
              /\ mapPut(zk_deleted, r, Len(db[zk_leader]))
-    /\ UNCHANGED <<zk_leader, zk_leader_epoch, zk_status>>
+    /\ UNCHANGED <<zk_leader, zk_leader_epoch>>
     /\ UNCHANGED zk_num_change
     /\ UNCHANGED db_vars
     /\ UNCHANGED global_vars
@@ -375,6 +375,7 @@ TruncateDeletedDB(r) ==
 TerminateCond ==
     /\ next_req = max_req
     /\ zk_num_change = max_change_leader
+    /\ zk_num_remove = max_remove_replica
     /\ zk_replicas = Replica
     /\ zk_leader /= nil
     /\ Len(client_log) = Len(db[zk_leader])
