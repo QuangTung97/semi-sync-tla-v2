@@ -26,7 +26,7 @@ EpochNumber == 11..30
 NullLogEntry == LogEntry \union {nil}
 NullReplica == Replica \union {nil}
 
-max_req == 40 + 3
+max_req == 40 + 2
 max_change_leader == 2
 
 
@@ -333,6 +333,8 @@ TerminateCond ==
     /\ next_req = max_req
     /\ zk_num_change = max_change_leader
     /\ zk_replicas = Replica
+    /\ zk_leader /= nil
+    /\ Len(client_log) = Len(db[zk_leader])
 
 Terminated ==
     /\ TerminateCond
