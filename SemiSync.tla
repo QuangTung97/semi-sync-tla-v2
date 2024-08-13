@@ -1,5 +1,5 @@
 ------ MODULE SemiSync ----
-EXTENDS TLC, Naturals, Sequences, FiniteSets
+EXTENDS TLC, Integers, Sequences, FiniteSets
 
 CONSTANTS Replica, nil
 
@@ -7,11 +7,11 @@ VARIABLES
     next_req,
     db, db_leader, db_epoch, db_leader_epoch,
     db_replicas, db_replicated,
-    zk_leader, zk_epoch, zk_leader_epoch, zk_replicas, zk_status,
+    zk_leader, zk_epoch, zk_leader_epoch, zk_replicas, zk_status, zk_deleted,
     ctl_pc, ctl_epoch, ctl_leader, ctl_replicas, ctl_offset,
     client_log
 
-zk_vars == <<zk_leader, zk_epoch, zk_leader_epoch, zk_replicas, zk_status>>
+zk_vars == <<zk_leader, zk_epoch, zk_leader_epoch, zk_replicas, zk_status, zk_deleted>>
 db_vars == <<db, db_leader, db_epoch, db_leader_epoch, db_replicas, db_replicated>>
 ctl_vars == <<ctl_pc, ctl_epoch, ctl_leader, ctl_replicas, ctl_offset>>
 global_vars == <<next_req, client_log>>
@@ -20,7 +20,9 @@ vars == <<global_vars, db_vars, zk_vars, ctl_vars>>
 
 LogEntry == 41..50
 EpochNumber == 11..30
+
 NullLogEntry == LogEntry \union {nil}
+NullReplica == Replica \union {nil}
 
 max_req == 40 + 3
 
@@ -33,29 +35,51 @@ quorumOfSet(S) ==
 quorumOf(r) == quorumOfSet(db_replicas[r])
 
 
+\* ================================================
+\* Map Functions
+\* ================================================
+
+Range(f) == {f[x]: x \in DOMAIN f}
+
+mapPut(f, k, v) == LET newDomain == (DOMAIN f) \union {k} IN
+    /\ f' = [x \in newDomain |-> IF x = k THEN v ELSE f[x]]
+
+mapExist(f, k) == k \in DOMAIN f
+
+mapDelete(f, k) == LET newDomain == (DOMAIN f) \ {k} IN
+    /\ f' = [x \in newDomain |-> f[x]]
+
+MapOf(f, K, V) ==
+    /\ DOMAIN f \subseteq K
+    /\ Range(f) \subseteq V
+
+
 TypeOK ==
     /\ next_req \in LogEntry \union {40}
 
-    /\ zk_leader \in Replica
+    /\ zk_leader \in NullReplica
     /\ zk_epoch \in EpochNumber
     /\ zk_leader_epoch \in EpochNumber
     /\ zk_replicas \subseteq Replica
     /\ zk_status \in {"Normal", "WaitReplicate", "FindNewLeader"}
+    /\ MapOf(zk_deleted, Replica, 0..10)
 
-    /\ zk_leader \in zk_replicas
+    /\ zk_leader /= nil => (zk_leader \in zk_replicas)
 
     /\ db \in [Replica -> Seq(LogEntry)]
-    /\ db_leader \in [Replica -> Replica]
+    /\ db_leader \in [Replica -> NullReplica]
     /\ db_epoch \in [Replica -> EpochNumber]
     /\ db_leader_epoch \in [Replica -> EpochNumber]
     /\ db_replicas \in [Replica -> SUBSET Replica]
     /\ db_replicated \in [Replica -> [Replica -> 0..10]]
 
-    /\ ctl_pc \in {"Init", "CtlReadLeaderLog", "CtlReadReplicaLog", "Finished"}
+    /\ ctl_pc \in {
+        "Init", "CtlReadLeaderLog", "CtlReadReplicaLog",
+        "CtlFindNewLeader"}
     /\ ctl_epoch \in EpochNumber
-    /\ ctl_leader \in Replica
+    /\ ctl_leader \in NullReplica
     /\ ctl_replicas \subseteq Replica
-    /\ ctl_offset \in [Replica -> 0..10]
+    /\ ctl_offset \in [Replica -> 0..10 \union {-1}]
 
     /\ client_log \in Seq(LogEntry)
 
@@ -68,6 +92,7 @@ Init ==
     /\ zk_leader_epoch = zk_epoch
     /\ zk_replicas = {zk_leader}
     /\ zk_status = "Normal"
+    /\ zk_deleted = <<>>
 
     /\ db = [r \in Replica |-> <<>>]
     /\ db_leader = [r \in Replica |-> zk_leader]
@@ -116,11 +141,12 @@ AppendClientLog(r) ==
 
 ZkAddReplica(r) ==
     /\ ~(r \in zk_replicas)
+    /\ ~(r \in DOMAIN zk_deleted)
     /\ zk_status = "Normal"
     /\ zk_replicas' = zk_replicas \union {r}
     /\ zk_epoch' = zk_epoch + 1
     /\ zk_status' = "WaitReplicate"
-    /\ UNCHANGED <<zk_leader, zk_leader_epoch>>
+    /\ UNCHANGED <<zk_leader, zk_leader_epoch, zk_deleted>>
     /\ UNCHANGED global_vars
     /\ UNCHANGED db_vars
     /\ UNCHANGED ctl_vars
@@ -129,9 +155,17 @@ ZkAddReplica(r) ==
 ZkPrepareChangeLeader ==
     /\ Cardinality(zk_replicas) > 1
     /\ zk_status = "Normal"
+    /\ zk_replicas' = zk_replicas \ {zk_leader}
+    /\ \E r2 \in zk_replicas':
+        /\ mapPut(zk_deleted, zk_leader, Len(db[r2]))
     /\ zk_epoch' = zk_epoch + 1
-    /\ zk_status' = "FindNewLeader"
-    /\ UNCHANGED <<zk_leader, zk_replicas, zk_leader_epoch>>
+    /\ IF Cardinality(zk_replicas') > 1
+        THEN /\ zk_status' = "FindNewLeader"
+             /\ zk_leader' = nil
+             /\ UNCHANGED <<zk_leader_epoch>>
+        ELSE /\ UNCHANGED zk_status
+             /\ zk_leader' \in zk_replicas'
+             /\ zk_leader_epoch' = zk_epoch'
     /\ UNCHANGED db_vars
     /\ UNCHANGED global_vars
     /\ UNCHANGED ctl_vars
@@ -152,6 +186,7 @@ DBUpdateZKInfo(r) ==
 
 DBReceveFromLeader(r) == LET leader == db_leader[r] IN
     /\ leader /= r
+    /\ leader /= nil
     /\ r \in db_replicas[r]
     /\ db_leader_epoch[r] = db_leader_epoch[leader]
     /\ Len(db[r]) < Len(db[leader])
@@ -179,18 +214,20 @@ DBUpdateReplicated(r, r1) ==
 zkStatusToCtlPC ==
     IF zk_status = "WaitReplicate"
         THEN "CtlReadLeaderLog"
-        ELSE IF zk_status = ""
+        ELSE IF zk_status = "FindNewLeader"
+            THEN "CtlFindNewLeader"
+            ELSE "Init"
 
+
+initCtlOffset == ctl_offset' = [r \in Replica |-> -1]
 
 CtlUpdateZKInfo ==
     /\ ctl_epoch < zk_epoch
     /\ ctl_epoch' = zk_epoch
     /\ ctl_leader' = zk_leader
-    /\ ctl_pc' = IF zk_status = "WaitReplicate"
-        THEN "CtlReadLeaderLog"
-        ELSE "Init"
+    /\ ctl_pc' = zkStatusToCtlPC
     /\ ctl_replicas' = zk_replicas
-    /\ ctl_offset' = [r \in Replica |-> 0]
+    /\ initCtlOffset
     /\ UNCHANGED global_vars
     /\ UNCHANGED db_vars
     /\ UNCHANGED zk_vars
@@ -225,14 +262,54 @@ CtlSetZkNormal ==
     /\ ctl_epoch = zk_epoch
     /\ \E Q \in quorumOfSet(ctl_replicas):
         \A r \in Q: ctl_offset[r] >= ctl_offset[ctl_leader]
-    /\ ctl_pc' = "Finished"
+
     /\ zk_status' = "Normal"
     /\ zk_epoch' = zk_epoch + 1
-    /\ UNCHANGED <<zk_leader_epoch, zk_leader, zk_replicas>>
-    /\ UNCHANGED <<ctl_epoch, ctl_leader, ctl_replicas, ctl_offset>>
+    /\ UNCHANGED <<zk_leader_epoch, zk_leader, zk_replicas, zk_deleted>>
+
+    /\ ctl_pc' = "Init"
+    /\ ctl_epoch' = zk_epoch'
+    /\ initCtlOffset
+    /\ UNCHANGED <<ctl_leader, ctl_replicas>>
+
     /\ UNCHANGED db_vars
     /\ UNCHANGED global_vars
 
+
+CtlFindNewLeader(r) ==
+    /\ ctl_pc = "CtlFindNewLeader"
+    /\ r \in ctl_replicas
+    /\ ctl_offset[r] < Len(db[r])
+    /\ ctl_offset' = [ctl_offset EXCEPT ![r] = Len(db[r])]
+    /\ UNCHANGED <<ctl_epoch, ctl_leader, ctl_pc, ctl_replicas>>
+    /\ UNCHANGED zk_vars
+    /\ UNCHANGED global_vars
+    /\ UNCHANGED db_vars
+
+
+CtlSetNewLeader(r) ==
+    /\ ctl_pc = "CtlFindNewLeader"
+    /\ r \in ctl_replicas
+    /\ zk_epoch = ctl_epoch
+    /\ \E Q \in quorumOfSet(ctl_replicas):
+        /\ r \in Q
+        /\ \A r1 \in Q:
+            /\ ctl_offset[r1] >= 0
+            /\ ctl_offset[r] >= ctl_offset[r1]
+    /\ zk_epoch' = zk_epoch + 1
+    /\ zk_leader' = r
+    /\ zk_leader_epoch' = zk_epoch'
+    /\ zk_status' = "WaitReplicate"
+
+    /\ ctl_epoch' = zk_epoch'
+    /\ ctl_leader' = zk_leader'
+    /\ initCtlOffset
+    /\ ctl_pc' = "CtlReadLeaderLog"
+
+    /\ UNCHANGED ctl_replicas
+    /\ UNCHANGED <<zk_replicas, zk_deleted>>
+    /\ UNCHANGED db_vars
+    /\ UNCHANGED global_vars
 
 Next ==
     \/ \E r \in Replica:
@@ -243,6 +320,8 @@ Next ==
         \/ DBReceveFromLeader(r)
         \/ \E r1 \in Replica: DBUpdateReplicated(r, r1)
         \/ CtlReadReplicaLog(r)
+        \/ CtlFindNewLeader(r)
+        \/ CtlSetNewLeader(r)
     \/ CtlUpdateZKInfo
     \/ CtlReadLeaderLog
     \/ CtlSetZkNormal
@@ -250,9 +329,12 @@ Next ==
     \/ Terminated
 
 
-Consistent ==
+ConsistentWhenLeaderValid ==
     /\ Len(db[zk_leader]) >= Len(client_log)
     /\ client_log = SubSeq(db[zk_leader], 1, Len(client_log))
+    
+Consistent ==
+    /\ zk_leader /= nil => ConsistentWhenLeaderValid
 
 
 Perms == Permutations(Replica)
