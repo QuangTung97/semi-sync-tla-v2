@@ -143,7 +143,7 @@ AppendClientLog(r) ==
 ZkAddReplica(r) ==
     /\ ~(r \in zk_replicas)
     /\ ~(r \in DOMAIN zk_deleted)
-    /\ zk_status = "Normal"
+    /\ zk_status = "Normal" \/ zk_status = "WaitReplicate"
     /\ zk_replicas' = zk_replicas \union {r}
     /\ zk_epoch' = zk_epoch + 1
     /\ zk_status' = "WaitReplicate"
@@ -180,7 +180,9 @@ DBUpdateZKInfo(r) ==
     /\ db_leader_epoch' = [db_leader_epoch EXCEPT ![r] = zk_leader_epoch]
     /\ db_leader' = [db_leader EXCEPT ![r] = zk_leader]
     /\ db_replicas' = [db_replicas EXCEPT ![r] = zk_replicas]
-    /\ db_replicated' = [db_replicated EXCEPT ![r] = [r2 \in Replica |-> 0]]
+    /\ IF zk_leader_epoch = db_leader_epoch[r]
+        THEN UNCHANGED db_replicated
+        ELSE db_replicated' = [db_replicated EXCEPT ![r] = [r2 \in Replica |-> 0]]
     /\ UNCHANGED db
     /\ UNCHANGED zk_vars
     /\ UNCHANGED global_vars
@@ -204,6 +206,7 @@ DBReceveFromLeader(r) == LET leader == db_leader[r] IN
 DBUpdateReplicated(r, r1) ==
     /\ db_leader[r] = r
     /\ r1 /= r
+    /\ r1 \in db_replicas[r1]
     /\ db_leader_epoch[r] = db_leader_epoch[r1]
     /\ db_replicated[r][r1] < Len(db[r1])
     /\ db_replicated' = [db_replicated EXCEPT ![r][r1] = Len(db[r1])]
