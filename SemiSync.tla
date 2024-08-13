@@ -9,11 +9,12 @@ VARIABLES
     db_replicas, db_replicated,
     zk_leader, zk_epoch, zk_leader_epoch,
     zk_replicas, zk_status, zk_deleted, zk_num_change,
+    zk_num_remove,
     ctl_pc, ctl_epoch, ctl_leader, ctl_replicas, ctl_offset,
     client_log
 
 zk_vars == <<zk_leader, zk_epoch, zk_leader_epoch,
-    zk_replicas, zk_status, zk_deleted, zk_num_change>>
+    zk_replicas, zk_status, zk_deleted, zk_num_change, zk_num_remove>>
 db_vars == <<db, db_leader, db_epoch, db_leader_epoch, db_replicas, db_replicated>>
 ctl_vars == <<ctl_pc, ctl_epoch, ctl_leader, ctl_replicas, ctl_offset>>
 global_vars == <<next_req, client_log>>
@@ -28,6 +29,7 @@ NullReplica == Replica \union {nil}
 
 max_req == 40 + 2
 max_change_leader == 2
+max_remove_replica == 2
 
 
 replicationFactor(n) == (n + 2) \div 2
@@ -67,6 +69,7 @@ TypeOK ==
     /\ zk_status \in {"Normal", "WaitReplicate", "FindNewLeader"}
     /\ MapOf(zk_deleted, Replica, 0..10)
     /\ zk_num_change \in 0..20
+    /\ zk_num_remove \in 0..20
 
     /\ zk_leader /= nil => (zk_leader \in zk_replicas)
 
@@ -98,6 +101,7 @@ Init ==
     /\ zk_status = "Normal"
     /\ zk_deleted = <<>>
     /\ zk_num_change = 0
+    /\ zk_num_remove = 0
 
     /\ db = [r \in Replica |-> <<>>]
     /\ db_leader = [r \in Replica |-> zk_leader]
@@ -148,14 +152,37 @@ ZkAddReplica(r) ==
     /\ zk_epoch' = zk_epoch + 1
     /\ zk_status' = "WaitReplicate"
     /\ UNCHANGED <<zk_leader, zk_leader_epoch, zk_deleted, zk_num_change>>
+    /\ UNCHANGED zk_num_remove
     /\ UNCHANGED global_vars
     /\ UNCHANGED db_vars
+    /\ UNCHANGED ctl_vars
+
+
+ZkRemoveReplica(r) ==
+    /\ zk_num_remove < max_remove_replica
+    /\ zk_num_remove' = zk_num_remove + 1
+
+    /\ r \in zk_replicas
+    /\ r /= zk_leader
+    /\ zk_status = "Normal" \* TODO Remove
+    /\ zk_epoch' = zk_epoch + 1
+    /\ zk_replicas' = zk_replicas \ {r}
+    /\ IF Cardinality(zk_replicas') = 1
+        THEN /\ zk_status = "Normal"
+             /\ UNCHANGED zk_deleted
+        ELSE /\ zk_status = "WaitReplicate"
+             /\ mapPut(zk_deleted, r, Len(db[zk_leader]))
+    /\ UNCHANGED <<zk_leader, zk_leader_epoch, zk_status>>
+    /\ UNCHANGED zk_num_change
+    /\ UNCHANGED db_vars
+    /\ UNCHANGED global_vars
     /\ UNCHANGED ctl_vars
 
 
 ZkPrepareChangeLeader ==
     /\ zk_num_change < max_change_leader
     /\ zk_num_change' = zk_num_change + 1
+
     /\ Cardinality(zk_replicas) > 1
     /\ zk_status = "Normal"
     /\ zk_replicas' = zk_replicas \ {zk_leader}
@@ -169,6 +196,7 @@ ZkPrepareChangeLeader ==
         ELSE /\ UNCHANGED zk_status
              /\ zk_leader' \in zk_replicas'
              /\ zk_leader_epoch' = zk_epoch'
+    /\ UNCHANGED zk_num_remove
     /\ UNCHANGED db_vars
     /\ UNCHANGED global_vars
     /\ UNCHANGED ctl_vars
@@ -196,6 +224,7 @@ DBReceveFromLeader(r) == LET leader == db_leader[r] IN
     /\ leader /= r
     /\ leader /= nil
     /\ r \in db_replicas[r]
+    /\ r \in db_replicas[leader]
     /\ db_leader_epoch[r] = db_leader_epoch[leader]
     /\ Len(db[r]) < Len(db[leader])
     /\ LET n == Len(db[r]) IN
@@ -274,7 +303,8 @@ CtlSetZkNormal ==
 
     /\ zk_status' = "Normal"
     /\ zk_epoch' = zk_epoch + 1
-    /\ UNCHANGED <<zk_leader_epoch, zk_leader, zk_replicas, zk_deleted, zk_num_change>>
+    /\ UNCHANGED <<zk_leader_epoch, zk_leader, zk_replicas, zk_deleted>>
+    /\ UNCHANGED <<zk_num_change, zk_num_remove>>
 
     /\ ctl_pc' = "Init"
     /\ ctl_epoch' = zk_epoch'
@@ -318,19 +348,26 @@ CtlSetNewLeader(r) ==
     /\ ctl_pc' = "CtlReadLeaderLog"
 
     /\ UNCHANGED ctl_replicas
-    /\ UNCHANGED <<zk_replicas, zk_deleted, zk_num_change>>
+    /\ UNCHANGED <<zk_replicas, zk_deleted, zk_num_change, zk_num_remove>>
     /\ UNCHANGED db_vars
     /\ UNCHANGED global_vars
 
+
+
+subSeqMin(S, n) ==
+    IF Len(S) < n
+        THEN S
+        ELSE SubSeq(S, 1, n)
 
 TruncateDeletedDB(r) ==
     /\ r \in DOMAIN zk_deleted
     /\ db_epoch[r] = zk_epoch
     /\ mapDelete(zk_deleted, r)
     /\ zk_epoch' = zk_epoch + 1
-    /\ db' = [db EXCEPT ![r] = SubSeq(@, 1, zk_deleted[r])]
+    /\ db' = [db EXCEPT ![r] = subSeqMin(@, zk_deleted[r])]
     /\ UNCHANGED <<db_epoch, db_leader, db_leader_epoch, db_replicas, db_replicated>>
-    /\ UNCHANGED <<zk_leader, zk_leader_epoch, zk_replicas, zk_status, zk_num_change>>
+    /\ UNCHANGED <<zk_leader, zk_leader_epoch, zk_replicas, zk_status>>
+    /\ UNCHANGED <<zk_num_change, zk_num_remove>>
     /\ UNCHANGED ctl_vars
     /\ UNCHANGED global_vars
 
@@ -353,6 +390,7 @@ Next ==
         \/ AppendLog(r)
         \/ AppendClientLog(r)
         \/ ZkAddReplica(r)
+        \/ ZkRemoveReplica(r)
         \/ DBUpdateZKInfo(r)
         \/ DBReceveFromLeader(r)
         \/ \E r1 \in Replica: DBUpdateReplicated(r, r1)
@@ -372,6 +410,13 @@ FairSpec == Spec /\ WF_vars(Next)
 
 AlwaysFinish == <> TerminateCond
 
+CanRecvReqAfterFailed ==
+    /\ zk_num_change = max_change_leader
+    /\ zk_replicas = Replica
+    /\ zk_status = "Normal"
+    /\ next_req = 40
+    ~> client_log = <<41, 42>>
+
 
 ConsistentWhenLeaderValid ==
     /\ Len(db[zk_leader]) >= Len(client_log)
@@ -379,6 +424,8 @@ ConsistentWhenLeaderValid ==
     
 Consistent ==
     /\ zk_leader /= nil => ConsistentWhenLeaderValid
+    /\ zk_status = "Normal" => zk_leader /= nil
+    /\ \A r \in DOMAIN zk_deleted: ~(r \in zk_replicas)
     \* /\ TerminateCond => client_log /= <<41, 42>> \* Couter Condition
 
 
